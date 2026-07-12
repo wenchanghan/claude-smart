@@ -70,6 +70,7 @@ interface SkillCard {
   status: SkillStatus;
   scopeId: string;
   host: Host | null;
+  hostUnavailable: boolean;
 }
 
 function projectSkill(
@@ -87,6 +88,7 @@ function projectSkill(
     status: statusLabel(p),
     scopeId: p.user_id || "unknown",
     host: requestHosts.get(p.request_id) ?? null,
+    hostUnavailable: false,
   };
 }
 
@@ -102,6 +104,7 @@ function sharedSkill(p: AgentPlaybook): SkillCard {
     status: agentPlaybookStatusLabel(p),
     scopeId: p.agent_version || "default",
     host: null,
+    hostUnavailable: true,
   };
 }
 
@@ -132,7 +135,7 @@ export default function SkillsPage() {
     let cancelled = false;
     async function load() {
       try {
-        const [projectRes, sharedRes, statsRes] = await Promise.all([
+        const [projectRes, sharedRes, statsRes, sessionsRes] = await Promise.all([
             reflexio.getUserPlaybooks({
               limit: 500,
               statusFilter: ALL_LIFECYCLE_STATUSES,
@@ -149,27 +152,21 @@ export default function SkillsPage() {
                 success: false,
                 stats: [] as PlaybookApplicationStat[],
               })),
+            fetch("/api/sessions", { cache: "no-store" })
+              .then(async (r) => {
+                if (!r.ok) throw new Error(`sessions ${r.status}`);
+                const data = await r.json();
+                return { sessions: (data.sessions ?? []) as SessionSummary[], failed: false };
+              })
+              .catch(() => ({ sessions: [] as SessionSummary[], failed: true })),
           ]);
         if (cancelled) return;
         setProjectSkills(projectRes.user_playbooks ?? []);
         setSharedSkills(sharedRes.agent_playbooks ?? []);
         setAppStats(statsRes.stats ?? []);
         setError(null);
-        let attributionFailed = false;
-        const sessions = await fetch("/api/sessions", { cache: "no-store" })
-          .then(async (response) => {
-            if (!response.ok) throw new Error(`sessions ${response.status}`);
-            const data = await response.json();
-            return (data.sessions ?? []) as SessionSummary[];
-          })
-          .catch(() => {
-            attributionFailed = true;
-            return [] as SessionSummary[];
-          });
-        if (!cancelled) {
-          setRequestHosts(hostByRequestId(sessions));
-          setAttributionUnavailable(attributionFailed);
-        }
+        setRequestHosts(hostByRequestId(sessionsRes.sessions));
+        setAttributionUnavailable(sessionsRes.failed);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       }
@@ -242,6 +239,8 @@ export default function SkillsPage() {
     setStatusFilter(kind === "project" ? "CURRENT" : "__all__");
   };
 
+  const allScopesLabel = activeKind === "project" ? "All user scopes" : "All agents";
+
   return (
     <div className="flex-1 overflow-auto">
       <PageHeader
@@ -255,17 +254,11 @@ export default function SkillsPage() {
             >
               <SelectTrigger size="sm" className="w-40 text-xs bg-background/80">
                 <SelectValue>
-                  {scope === "__all__"
-                    ? activeKind === "project"
-                      ? "All user scopes"
-                      : "All agents"
-                    : scope}
+                  {scope === "__all__" ? allScopesLabel : scope}
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="__all__">
-                  {activeKind === "project" ? "All user scopes" : "All agents"}
-                </SelectItem>
+                <SelectItem value="__all__">{allScopesLabel}</SelectItem>
                 {scopes.map((p) => (
                   <SelectItem key={p} value={p}>
                     {p}
@@ -425,7 +418,7 @@ export default function SkillsPage() {
                       )}
                       <HostBadge
                         host={p.host}
-                        unavailable={p.kind === "shared"}
+                        unavailable={p.hostUnavailable}
                       />
                       <StatusBadge kind={p.kind} status={p.status} />
                       <Badge variant="secondary" className="h-5 text-[10px]">
